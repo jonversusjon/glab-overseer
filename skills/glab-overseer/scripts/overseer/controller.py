@@ -84,9 +84,10 @@ def inside_root(root, path):
 # ---- shared reads -------------------------------------------------------------
 
 def is_closed(root, plan_id, unit, st):
-    """A code unit is closed by a merged pull request; a job unit by a DONE judgment. `abandoned` closes nothing."""
+    """A code unit is closed by a merged pull request; a job unit by a DONE judgment; a pr unit by an open pull
+    request (closure `closed`). `abandoned` closes nothing."""
     state = st["closure"].get("state")
-    if state == "merged" or (state == "closed" and unit["kind"] == "job"):
+    if state == "merged" or (state == "closed" and unit["kind"] in ("job", "pr")):
         return True
     if unit["kind"] == "job" and X._int(st["counters"]["attempts"]):
         j = J.valid_judgment(root, plan_id, unit, st["counters"]["attempts"])
@@ -312,6 +313,8 @@ def _issue_merge(root, plan_id, unit, repo, intent):
 
 def merge_unit(root, plan_id, unit):
     gate(root, plan_id)
+    if unit["kind"] == "pr":
+        raise ControllerError("unit %s is a pr unit; the supervisor never merges its pull request" % unit["id"])
     if unit["kind"] != "code":
         raise ControllerError("unit %s is a job unit; it closes on a DONE judgment (`issues close` files the tracker step)" % unit["id"])
     plan = approval.effective_plan(root, plan_id)
@@ -401,8 +404,12 @@ def _unit_action(root, plan, u, st, free, after_quota=False):
         return "stop", "needs %s, which is abandoned and never merged; an orchestrator decision is needed" % ", ".join(blocked)
     if is_closed(root, pid, u, st):
         if _issue(root, pid, uid) and st["tracker"].get("state") not in ("closed", "none"):
-            return "tracker", ("run `issues close`" if u["kind"] == "job" else "rerun `merge` to retry the tracker step")
+            return "tracker", ("run `issues close`" if u["kind"] in ("job", "pr") else "rerun `merge` to retry the tracker step")
         return None
+    if u["kind"] == "pr":  # no worker, attempt or slot: ready once its needs are closed
+        if not all(is_closed(root, pid, X._unit_of(plan, d), approval.load_unit_state(root, pid, d)) for d in u["needs"]):
+            return None
+        return "pr", "open the pull request for %s into %s" % (u["head_branch"], u["base_branch"])
     active = X.active_invocations(root, pid, uid, False)
     if active:
         return "wait", "%s %s" % (active[0]["seq"], active[0]["status"]["state"])
@@ -526,6 +533,8 @@ def dispatch_ready(root, plan_id=None, after_quota=False):
                 try:
                     if u["kind"] == "code":
                         rec = W.dispatch_code(root, a["plan"], u, after_quota)
+                    elif u["kind"] == "pr":
+                        continue  # unreachable: no pr unit yields a dispatch or retry action
                     else:
                         rec = X.dispatch_job(root, a["plan"], u, after_quota)
                 except X.SlotsFull as e:  # skip this unit; other plans or units may still have a slot

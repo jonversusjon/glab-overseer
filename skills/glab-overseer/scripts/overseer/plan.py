@@ -10,7 +10,16 @@ import re
 from .paths import ID_PATTERN, glob_match, has_glob_meta, relpath_problem, valid_id
 
 CAP_MAX = {"workers": 3, "attempts": 2, "review_rounds": 3}
-KINDS = ("code", "job")
+KINDS = ("code", "job", "pr")
+PLAN_KEYS = ("plan_id", "repo", "target_branch", "scope", "caps", "test_globs", "slurm", "units")
+UNIT_KEYS = {
+    "code": ("id", "kind", "title", "prompt", "claims", "test_command", "outputs", "scope", "needs", "slurm"),
+    "job": ("id", "kind", "title", "command", "outputs", "scope", "needs", "slurm"),
+    "pr": ("id", "kind", "title", "head_branch", "head_sha", "base_branch", "draft", "body", "needs"),
+}
+PR_ONLY_BAD = ("prompt", "claims", "test_command", "command", "outputs", "scope", "slurm")
+PR_REQUIRED = ("title", "head_branch", "body")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 CODE_REQUIRED = ("title", "prompt", "claims", "test_command", "outputs", "scope")
 JOB_REQUIRED = ("title", "command", "outputs")
 FORBIDDEN_KEYS = ("model", "models", "provider", "family", "thinking", "effort")
@@ -194,10 +203,18 @@ def validate_plan(plan):
     if not (isinstance(plan.get("target_branch"), str) and plan["target_branch"].strip()):
         errors.append("missing or empty field 'target_branch'")
 
+    extra = sorted(k for k in plan if k not in PLAN_KEYS)
+    if extra:
+        errors.append("plan: unknown key(s) %s (allowed: %s)" % (", ".join(repr(k) for k in extra), ", ".join(PLAN_KEYS)))
+
     scope = plan.get("scope")
     plan_scope = []
+    raw_units = plan.get("units")
+    has_code = isinstance(raw_units, list) and any(isinstance(u, dict) and u.get("kind") == "code" for u in raw_units)
     if not _present(scope):
-        errors.append("missing or empty field 'scope'")
+        # a plan with no code unit may omit scope or give []
+        if has_code or scope not in (None, []):
+            errors.append("missing or empty field 'scope'")
     elif _check_globs("plan", "scope glob", scope, errors):
         plan_scope = scope
     if "test_globs" in plan:
@@ -243,7 +260,9 @@ def validate_plan(plan):
         else:
             seen.add(uid)
             ids.append(uid)
-        _validate_unit(u, label, plan_scope, plan_slurm, errors)
+        _validate_unit(u, label, plan_scope, plan_slurm, errors, target=plan.get("target_branch"))
+        if not has_code and not _present(scope) and isinstance(u.get("scope"), list) and u["scope"]:
+            errors.append("%s: scope is not covered by the plan scope; the plan declares none" % label)
 
     known = set(ids)
     graph = {}
@@ -271,14 +290,63 @@ def _forbidden_key(k):
     return k in FORBIDDEN_KEYS or k.endswith(FORBIDDEN_SUFFIXES) or k.startswith(FORBIDDEN_PREFIXES)
 
 
-def _validate_unit(u, label, plan_scope, plan_slurm, errors):
+def _branch_problem(name, what):
+    from .workspace import WorkspaceError, check_branch_name  # lazy: workspace imports this module
+    try:
+        check_branch_name(name, what)
+    except WorkspaceError as e:
+        return str(e)
+    return None
+
+
+def _validate_pr(u, label, target, errors):
+    for f in PR_REQUIRED:
+        if not _present(u.get(f)):
+            errors.append("%s: missing or empty field '%s'" % (label, f))
+    for f in ("title", "head_branch", "body", "base_branch"):
+        if u.get(f) is not None and not isinstance(u[f], str):
+            errors.append("%s: field '%s' must be a string" % (label, f))
+    needs = u.get("needs", [])
+    if not isinstance(needs, list) or not all(isinstance(n, str) for n in needs):
+        errors.append("%s: needs must be a list of unit ids" % label)
+    head, base = u.get("head_branch"), u.get("base_branch")
+    if base is None:
+        base = target
+    for what, name in (("head_branch", u.get("head_branch")), ("base_branch", u.get("base_branch"))):
+        if isinstance(name, str) and name.strip():
+            problem = _branch_problem(name, what)
+            if problem:
+                errors.append("%s: %s" % (label, problem))
+    if isinstance(head, str) and isinstance(base, str) and head == base:
+        errors.append("%s: head_branch %r must differ from its base %r" % (label, head, base))
+    sha = u.get("head_sha")
+    if sha is not None and not (isinstance(sha, str) and COMMIT_RE.match(sha)):
+        errors.append("%s: head_sha must be 40 lowercase hex digits" % label)
+    if u.get("draft") is not None and not isinstance(u["draft"], bool):
+        errors.append("%s: draft must be true or false" % label)
+
+
+def _validate_unit(u, label, plan_scope, plan_slurm, errors, target=None):
+    reported = set()
     for k in sorted(u):
         if _forbidden_key(k):
+            reported.add(k)
             errors.append("%s: field %r names a model, provider or family; "
                           "model roles are fixed by the host, not by the plan" % (label, k))
     kind = u.get("kind")
     if kind not in KINDS:
-        errors.append("%s: kind %r must be 'code' or 'job'" % (label, kind))
+        errors.append("%s: kind %r must be 'code', 'job' or 'pr'" % (label, kind))
+        return
+    allowed = UNIT_KEYS[kind]
+    extra = sorted(k for k in u if k not in allowed and k not in reported)
+    if extra:
+        msg = "%s: unknown key(s) %s for a %s unit (allowed: %s)" % (
+            label, ", ".join(repr(k) for k in extra), kind, ", ".join(allowed))
+        if kind == "pr" and any(k in PR_ONLY_BAD for k in extra):
+            msg += "; a pr unit has no worker, command, outputs, scope or slurm block"
+        errors.append(msg)
+    if kind == "pr":
+        _validate_pr(u, label, target, errors)
         return
     for f in (CODE_REQUIRED if kind == "code" else JOB_REQUIRED):
         if not _present(u.get(f)):
@@ -367,7 +435,14 @@ def normalize_output(o):
     return dict((k, o[k]) for k in OUTPUT_KEYS if k in o and o[k] is not None)
 
 
-def normalize_unit(u):
+def normalize_unit(u, target=None):
+    if u["kind"] == "pr":
+        out = {"id": u["id"], "kind": "pr", "title": u["title"], "needs": sorted(set(u.get("needs") or [])),
+               "head_branch": u["head_branch"], "base_branch": u.get("base_branch") or target,
+               "draft": bool(u.get("draft")), "body": u["body"]}
+        if u.get("head_sha"):
+            out["head_sha"] = u["head_sha"]
+        return out
     out = {
         "id": u["id"], "kind": u["kind"], "title": u["title"],
         "needs": sorted(set(u.get("needs") or [])),
@@ -392,10 +467,10 @@ def normalize_plan(plan):
         "plan_id": plan["plan_id"],
         "repo": plan["repo"],
         "target_branch": plan["target_branch"],
-        "scope": sorted(set(plan["scope"])),
+        "scope": sorted(set(plan.get("scope") or [])),
         "caps": dict(CAP_MAX, **(plan.get("caps") or {})),
         "test_globs": sorted(set(plan.get("test_globs") or [])),
-        "units": [normalize_unit(u) for u in plan["units"]],
+        "units": [normalize_unit(u, plan["target_branch"]) for u in plan["units"]],
     }
     if plan.get("slurm"):
         out["slurm"] = dict(plan["slurm"])
@@ -408,6 +483,13 @@ def issue_marker(plan_id, unit_id):
 
 def render_draft(plan_id, unit):
     lines = [issue_marker(plan_id, unit["id"]), "", "Kind: %s" % unit["kind"], ""]
+    if unit["kind"] == "pr":
+        lines += ["## Pull request", "- head: `%s`" % unit["head_branch"], "- base: `%s`" % unit["base_branch"]]
+        if unit.get("head_sha"):
+            lines.append("- head commit: `%s`" % unit["head_sha"])
+        lines += ["- draft: %s" % ("true" if unit["draft"] else "false"), ""]
+        lines += ["## Needs"] + (["- %s" % n for n in unit["needs"]] or ["- none"]) + [""]
+        return {"title": unit["title"], "body": "\n".join(lines)}
     if unit.get("claims"):
         lines += ["## Claims"] + ["- %s" % c for c in unit["claims"]] + [""]
     lines += ["## Outputs"] + ["- `%s`" % o["path"] for o in unit["outputs"]] + [""]

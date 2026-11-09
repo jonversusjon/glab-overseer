@@ -95,7 +95,8 @@ if a[0] == "pr" and a[1] == "list":
 if a[0] == "pr" and a[1] == "create":
     n = len(st["prs"]) + 1
     st["prs"].append({"number": n, "state": "OPEN", "headRefName": opt("--head"), "baseRefName": opt("--base"),
-                      "title": opt("--title"), "body": open(opt("--body-file")).read(), "mergeCommit": None})
+                      "title": opt("--title"), "body": open(opt("--body-file")).read(), "mergeCommit": None,
+                      "isDraft": "--draft" in a})
     out("https://github.com/%%s/pull/%%d\n" %% (repo, n))
 if a[0] == "pr" and a[1] == "edit":
     st["prs"][int(a[2]) - 1]["body"] = open(opt("--body-file")).read()

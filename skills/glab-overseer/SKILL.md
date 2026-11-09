@@ -49,12 +49,12 @@ Before `plan approve`, show the user the plan and every issue title (`validate` 
 | `dispositions` | rule on every finding: `dispositions U FILE.json` |
 | `fix` | write the fix prompt to a file, then `overseer.py fix U --prompt-file F` |
 | `nonvacuous` | `overseer.py nonvacuous U` |
-| `pr` | `overseer.py pr U` |
+| `pr` | `overseer.py pr U` (a code unit: pushes the judged branch; a pr unit: opens the pull request for its existing branch) |
 | `merge` | `overseer.py merge U` |
-| `tracker` | rerun `merge U` (code) or `overseer.py issues close U --comment TEXT` (job) |
+| `tracker` | rerun `merge U` (code) or `overseer.py issues close U --comment TEXT` (job, pr) |
 | `stop` | the owner decides: section 4 |
 
-Per code unit the path is `dispatch`, `wait`, `judge`, `review`; then, for each finding you might act on, `overseer.py reproduce U --finding ID --command CMD`, and `dispositions` to rule on all of them; when a fix is needed, `fix`, `judge` and `review` again; then `nonvacuous`, `pr`, `merge`. Job units close on a DONE judgment; no review or PR. A job runs in the project checkout: before dispatching one that needs merged code units, update the checkout to the target, or `dispatch` refuses it. `status` (or `status --json`) shows unit facets, active invocations and slots at any time. `abort U` stops a unit's active invocations. `plan split U --into SPEC.json --reason TEXT` replaces an unclosed unit with narrower children inside the approved scope. Exact semantics and exit codes: `references/operating-loop.md`. Review mechanics: `references/review.md`.
+Per code unit the path is `dispatch`, `wait`, `judge`, `review`; then, for each finding you might act on, `overseer.py reproduce U --finding ID --command CMD`, and `dispositions` to rule on all of them; when a fix is needed, `fix`, `judge` and `review` again; then `nonvacuous`, `pr`, `merge`. Job units close on a DONE judgment; no review or PR. A unit with `kind: "pr"` opens a pull request for a branch that already exists on origin and has no worker, attempt or review: `next` says `pr U`, you run `overseer.py pr U` (it reads origin, never pushes, and closes the unit once the pull request reads back open), then `issues close U` files the tracker step. The supervisor never merges that pull request; it is for a human or another process. A job runs in the project checkout: before dispatching one that needs merged code units, update the checkout to the target, or `dispatch` refuses it. `status` (or `status --json`) shows unit facets, active invocations and slots at any time. `abort U` stops a unit's active invocations. `plan split U --into SPEC.json --reason TEXT` replaces an unclosed unit with narrower children inside the approved scope. Exact semantics and exit codes: `references/operating-loop.md`. Review mechanics: `references/review.md`.
 
 `merge` integrates the target branch into the unit branch (never rebase, never force push), retests, pushes, squash-merges the pull request and closes the unit. Exit codes: 3 ambiguous outcome (rerun to reconcile), 5 integration conflict (a stop for you to decide), 1 not ready.
 

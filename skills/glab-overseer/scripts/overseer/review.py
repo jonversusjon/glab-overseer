@@ -660,7 +660,7 @@ def patch_id(repo, a, b):
 def _unit(root, args):
     pid = args.plan or approval.find_plan_for_unit(root, args.unit)
     approval.require_approval(root, pid)
-    return pid, X._unit_of(approval.effective_plan(root, pid), args.unit)
+    return pid, X.refuse_pr_unit(X._unit_of(approval.effective_plan(root, pid), args.unit), "has no review, fix or non-vacuity check")
 
 
 def _show(d):

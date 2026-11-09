@@ -269,6 +269,8 @@ _INHERIT = ("kind", "prompt", "claims", "test_command", "command", "slurm", "nee
 
 
 def _build_children(parent, spec):
+    if parent["kind"] == "pr":
+        raise PlanStateError("unit %s is a pr unit; a pr unit opens one pull request and cannot be split" % parent["id"])
     items = spec.get("children") if isinstance(spec, dict) else spec
     if not isinstance(items, list) or not items:
         raise PlanStateError("split spec needs a non-empty list of children")
@@ -293,7 +295,9 @@ def _build_children(parent, spec):
             outs.append(dict(ppred[p]) if isinstance(o, str) and p in ppred else o)
         raw["outputs"] = outs
         errors = []
-        P._validate_unit(dict(raw, slurm=None), "child %s" % cid, [], None, errors)
+        known = P.UNIT_KEYS[parent["kind"]]  # a split spec's extra keys were always ignored; they stay ignored
+        P._validate_unit(dict((k, v) for k, v in dict(raw, slurm=None).items() if k in known),
+                         "child %s" % cid, [], None, errors)
         if errors:
             raise PlanStateError(errors[0])
         kids.append(P.normalize_unit(raw))
@@ -302,6 +306,8 @@ def _build_children(parent, spec):
 
 def check_split(parent, kids):
     """Refuse (OwnerStop) any child set that grows or weakens the parent."""
+    if parent["kind"] == "pr":
+        raise OwnerStop("unit %s is a pr unit and cannot be split" % parent["id"])
     pout = dict((o["path"], o) for o in parent["outputs"])
     pclaims = parent.get("claims", [])
     covered, claims_covered = set(), set()
@@ -367,6 +373,8 @@ def split_unit(root, plan_id, unit_id, spec, reason):
     parent = next((u for u in eff["units"] if u["id"] == unit_id), None)
     if parent is None:
         raise PlanStateError("unit %r is not in plan %s (already split?)" % (unit_id, plan_id))
+    if parent["kind"] == "pr":
+        raise PlanStateError("unit %s is a pr unit; a pr unit opens one pull request and cannot be split" % unit_id)
     pstate = load_unit_state(root, plan_id, unit_id)
     if pstate["closure"].get("state") == "split":  # marked split but no revision names it
         pstate["closure"] = {"state": "open"}
