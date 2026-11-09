@@ -6,7 +6,7 @@ State lives under `.overseer/` in the project root. Every command below acts on 
 
 `overseer.py next` prints one line per eligible action, derived from disk with no network call: `ACTION UNIT: detail`. `next --json` gives objects with `plan`, `unit`, `action`, `detail`. `next --plan PLAN_ID` limits it to one plan. `overseer.py status` shows each unit's facets (authorization, execution, closure, tracker), attempts and active invocations, and slot use against the caps. Add `--json` for scripts.
 
-A unit is READY when every unit in `needs` is closed. A code unit is closed when its pull request is merged. A job unit is closed when its judgment is DONE, including an orchestrator-resolved DONE. A worker process exiting closes nothing.
+A unit is READY when every unit in `needs` is closed. A code unit is closed when its pull request is merged. A job unit is closed when its judgment is DONE, including an orchestrator-resolved DONE. A pr unit is closed when its pull request is open (closure `closed`, via `pr opened`). A worker process exiting closes nothing.
 
 ## Actions
 
@@ -20,9 +20,11 @@ A unit is READY when every unit in `needs` is closed. A code unit is closed when
 
 `review`, `reproduce`, `dispositions`, `fix`, `nonvacuous`: see `review.md`.
 
+**pr units.** A `kind: "pr"` unit has no worker: `dispatch` (with or without `--unit`) never launches it or allocates an attempt, and `judge`, `resolve`, `review`, `fix`, `reproduce`, `dispositions`, `nonvacuous` and `merge` refuse it with an error. When its needs are closed, `next` prints `pr U`. `pr U` reads `head_branch` and `base_branch` from origin (`git ls-remote`) before any write and refuses when either is missing or when `head_sha` is set and does not match; it never pushes. It then creates the pull request with the unit's base, head, title and body (as a draft exactly when `draft` is true), or reconciles the open one that carries the unit marker; an open pull request without the marker or with another base is refused. It reads the pull request back and refuses on any mismatch, writes `units/U/pr.json`, and closes the unit. `next` then prints `tracker U: run `issues close`` while the unit's issue is open, so the path is `pr U`, then `issues close U --comment TEXT`. The supervisor never merges the pull request.
+
 `pr UNIT` pushes the judged candidate and opens or updates its pull request, then reads the head, base and body back. It never force pushes. `merge UNIT` first fetches the target; when the target advanced it merges the target into the unit branch, rejudges that merge, and carries the review forward only when `git patch-id` shows the unit's own change is identical (otherwise a new review round is needed, within the cap). It then pushes, squash-merges with `--match-head-commit`, reads back the merge, marks the unit merged and checks that the issue closed. It records original base, integration base, judged head, remote PR head and merge commit separately. Exit codes: 0 merged, 1 not ready or refused, 3 ambiguous (a call may or may not have taken effect; rerun the same command to reconcile, never repeat it blindly), 5 integration conflict (the merge was aborted; the owner decides).
 
-`issues close UNIT --comment TEXT` closes a job unit's issue after a DONE judgment. Code units' issues close through their merged pull request or, when the target is not the default branch, an explicit close inside `merge`.
+`issues close UNIT --comment TEXT` closes a job unit's issue after a DONE judgment, or a pr unit's issue once its closure is `closed` (it refuses a pr unit whose pull request is not open). Code units' issues close through their merged pull request or, when the target is not the default branch, an explicit close inside `merge`.
 
 `abort UNIT [--grace S]` stops a unit's active invocations and says whether termination was confirmed. `plan split` is in `plan-format.md`. `unlock --force --reason TEXT` removes a stale lock and records an event; it refuses a live local holder unless `--even-if-alive` is given.
 

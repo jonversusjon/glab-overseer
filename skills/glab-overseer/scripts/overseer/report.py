@@ -259,6 +259,8 @@ def _unit(root, pid, u, st, repo, gaps, effective):
                 gaps.add(uid, "attempt a%d directory missing" % k)
     if state in ("UNCERTAIN", "failed", "unjudged", "unknown", "running", "pending", "judged_done"):
         gaps.add(uid, "state " + state)
+    if u.get("kind") == "pr" and state == "closed" and not pr:
+        gaps.add(uid, "pull request record missing")
     if state in ("merged", "done") and st["tracker"].get("state") not in ("closed", "none"):
         gaps.add(uid, "tracker %s" % (_word(st["tracker"].get("state")) or "unknown"))
     return {
@@ -269,7 +271,9 @@ def _unit(root, pid, u, st, repo, gaps, effective):
         "attempts": attempts,
         "issue": {"number": _int(issue), "url": _url(repo, "issues", issue)} if _int(issue) is not None else None,
         "pr": {"number": _int(pr.get("number")), "url": _url(repo, "pull", pr.get("number")),
-               "head": _sha(pr.get("head_oid")), "candidate": _sha(pr.get("candidate"))} if pr else None,
+               "head": _sha(pr.get("head_oid")), "candidate": _sha(pr.get("candidate")),
+               **({"opened": True, "merged": False, "draft": pr.get("draft") is True} if u.get("kind") == "pr" else {})}
+        if pr else None,
         "merge": {"state": _word(mg.get("state")), "pr_head": _sha(mg.get("pr_head")), "merge_commit": _sha(mg.get("merge_commit")),
                   "integration_base": _sha(mg.get("integration_base")), "candidate": _sha(mg.get("candidate"))} if mg else None,
     }
@@ -506,7 +510,10 @@ def render(rep):
         out.append("")
         for u in p["units"]:
             out.append("### %s: %s" % (u["id"], _cell(u["title"])))
-            if u["pr"]:
+            if u["pr"] and u["kind"] == "pr":
+                out.append("- pull request %s opened, not merged%s, at %s" % (
+                    _cell(u["pr"]["url"]), " (draft)" if u["pr"].get("draft") else "", _short(u["pr"]["head"])))
+            elif u["pr"]:
                 out.append("- pull request %s at %s" % (_cell(u["pr"]["url"]), _short(u["pr"]["head"])))
             if u["issue"]:
                 out.append("- issue %s" % _cell(u["issue"]["url"]))

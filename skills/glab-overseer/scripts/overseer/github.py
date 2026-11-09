@@ -447,12 +447,19 @@ def _judgment(root, plan_id, unit):
 
 
 def close_unit_issue(root, plan_id, unit, comment):
-    """Close a job unit's issue after a DONE (or orchestrator-resolved done) judgment."""
-    if unit["kind"] != "job":
-        raise GithubError("only job units are closed here; code units close through their pull request")
-    j = _judgment(root, plan_id, unit)
-    if not j or j["status"] != "DONE":
-        raise GithubError("unit %s has no valid DONE judgment" % unit["id"])
+    """Close a job unit's issue after a DONE (or orchestrator-resolved done) judgment, or a pr unit's issue
+    once its pull request is open (closure `closed`)."""
+    if unit["kind"] == "pr":
+        closure = approval.load_unit_state(root, plan_id, unit["id"])["closure"]
+        if closure.get("state") != "closed":
+            raise GithubError("unit %s has no opened pull request (closure %s); run `pr %s` first"
+                              % (unit["id"], closure.get("state"), unit["id"]))
+    elif unit["kind"] != "job":
+        raise GithubError("only job and pr units are closed here; code units close through their pull request")
+    else:
+        j = _judgment(root, plan_id, unit)
+        if not j or j["status"] != "DONE":
+            raise GithubError("unit %s has no valid DONE judgment" % unit["id"])
     number = (store.read_json(_issues_path(root, plan_id)).get("filed") or {}).get(unit["id"])
     if not _is_int(number):
         raise GithubError("unit %s has no filed issue" % unit["id"])
@@ -604,6 +611,105 @@ def open_pr(root, plan_id, unit):
     return rec
 
 
+def readback_branch_pr(number, repo):
+    """Number, state, head ref and oid, base ref, draft flag, title and body of a pull request (pr units)."""
+    d = _read(["pr", "view", str(number), "-R", repo, "--json",
+               "number,state,headRefName,headRefOid,baseRefName,isDraft,title,body"], "pr view", dict)
+    if not (d.get("number") == number and d.get("state") in ("OPEN", "CLOSED", "MERGED")
+            and all(isinstance(d.get(k), str) for k in ("headRefName", "headRefOid", "baseRefName", "title", "body"))
+            and isinstance(d.get("isDraft"), bool)):
+        raise GithubError("pr view returned a malformed record for #%s" % number)
+    return {"number": number, "state": d["state"], "head_ref": d["headRefName"], "head_oid": d["headRefOid"],
+            "base_ref": d["baseRefName"], "draft": d["isDraft"], "title": d["title"], "body": d["body"]}
+
+
+def branch_pr_body(unit, issue, marker):
+    """Marker, `Refs #N` when the issue was filed (never `Closes`: the pull request is not merged here), the body."""
+    lines = [marker, ""]
+    if issue is not None:
+        lines += ["Refs #%d" % issue, ""]
+    return "\n".join(lines) + "\n" + unit["body"]
+
+
+def _same_body(a, b):
+    return a.replace("\r\n", "\n").strip() == b.replace("\r\n", "\n").strip()
+
+
+def open_branch_pr(root, plan_id, unit):
+    """Open (or reconcile) the pull request of a pr unit for a branch that already exists on origin.
+
+    Reads origin first and never pushes. Closes the unit once the pull request reads back OPEN as specified."""
+    if unit["kind"] != "pr":
+        raise GithubError("unit %s is not a pr unit" % unit["id"])
+    uid = unit["id"]
+    plan = approval.effective_plan(root, plan_id)
+    repo = plan["repo"]
+    head = W.check_branch_name(unit["head_branch"], "head_branch")
+    base = W.check_branch_name(unit["base_branch"], "base_branch")
+    head_oid = _remote_head(root, head)
+    if head_oid is None:
+        raise GithubError("head branch %s does not exist on origin; nothing was written" % head)
+    if unit.get("head_sha") and head_oid != unit["head_sha"]:
+        raise GithubError("origin %s is at %s, not the required head_sha %s; nothing was written"
+                          % (head, head_oid, unit["head_sha"]))
+    if _remote_head(root, base) is None:
+        raise GithubError("base branch %s does not exist on origin; nothing was written" % base)
+    issue = (store.read_json(_issues_path(root, plan_id)).get("filed") or {}).get(uid)
+    marker = marker_for(root, plan_id, uid)
+    body = branch_pr_body(unit, issue, marker)
+    opens = [e for e in _prs_for_branch(repo, head) if e.get("state") == "OPEN"]
+    for e in opens:
+        if e.get("baseRefName") != base:
+            raise GithubError("pull request #%d for %s has base %r, not %r; refusing to touch it"
+                              % (e["number"], head, e.get("baseRefName"), base))
+        if not has_marker(e.get("body") or "", marker):
+            raise GithubError("pull request #%d for %s does not carry this unit's marker; refusing to edit it"
+                              % (e["number"], head))
+    if len(opens) > 1:
+        raise GithubError("ambiguous: open pull requests %s share head %s" % (", ".join("#%d" % i["number"] for i in opens), head))
+    prec = store.read_json(os.path.join(paths.unit_dir(root, plan_id, uid), "pr.json"), None)
+    if not opens and isinstance(prec, dict) and _is_int(prec.get("number")):
+        was = readback_branch_pr(prec["number"], repo)  # opened earlier: never open a second one
+        raise GithubError("pull request #%d recorded for %s reads %s, not OPEN; refusing to open another"
+                          % (prec["number"], uid, was["state"]))
+    with _bodyfile(root, body) as bf:
+        if opens:
+            num = opens[0]["number"]
+            if not _same_body(opens[0].get("body") or "", body):
+                _write(root, "pr_edit", ["pr", "edit", str(num), "-R", repo, "--body-file", bf], pr=num, branch=head)
+        else:
+            argv = ["pr", "create", "-R", repo, "--base", base, "--head", head, "--title", unit["title"],
+                    "--body-file", bf] + (["--draft"] if unit["draft"] else [])
+            r, amb = _write(root, "pr_create", argv, unit=uid, branch=head)
+            m = PR_URL_RE.search(r["stdout"]) if not amb else None
+            if m:
+                num = int(m.group(1))
+            else:
+                found = [f for f in _prs_for_branch(repo, head, base) if has_marker(f.get("body") or "", marker)]
+                if len(found) != 1:
+                    raise Ambiguous("creating the pull request for %s has an unknown outcome (%d match the head); "
+                                    "rerun 'pr' to reconcile" % (uid, len(found)))
+                num = found[0]["number"]
+    back = readback_branch_pr(num, repo)
+    for what, got, want in (("state", back["state"], "OPEN"), ("head ref", back["head_ref"], head),
+                            ("head", back["head_oid"], head_oid), ("base", back["base_ref"], base),
+                            ("draft flag", back["draft"], unit["draft"]), ("title", back["title"], unit["title"])):
+        if got != want:
+            raise GithubError("pull request #%d %s reads %r, expected %r" % (num, what, got, want))
+    if not _same_body(back["body"], body):
+        raise GithubError("pull request #%d body does not read back as written" % num)
+    rec = {"number": num, "state": back["state"], "head_ref": back["head_ref"], "head_oid": back["head_oid"],
+           "base_ref": back["base_ref"], "draft": back["draft"], "issue": issue, "read_at": store.utc_now()}
+    store.write_json_atomic(os.path.join(paths.unit_dir(root, plan_id, uid), "pr.json"), rec)
+    store.append_event(root, "pr_recorded", plan_id=plan_id, unit_id=uid, number=num, head_oid=head_oid, draft=back["draft"])
+    st = approval.load_unit_state(root, plan_id, uid)
+    if st["closure"].get("state") != "closed":
+        st["closure"] = {"state": "closed", "via": "pr opened", "pr": num}
+        approval.save_unit_state(root, plan_id, uid, st)
+        store.append_event(root, "pr_unit_closed", plan_id=plan_id, unit_id=uid, number=num)
+    return rec
+
+
 # ---- commands ----------------------------------------------------------------
 
 def _plan_id(root, plan):
@@ -628,7 +734,7 @@ def configure_issues(p):
     f = sub.add_parser("file", help="file the approved drafts as GitHub issues and link dependencies")
     f.add_argument("--plan", default=None, metavar="PLAN_ID")
     f.add_argument("--dry-run", action="store_true", help="list actions; write nothing")
-    c = sub.add_parser("close", help="close a job unit's issue after a DONE judgment")
+    c = sub.add_parser("close", help="close the issue of a job unit (DONE judgment) or a pr unit (pull request open)")
     c.add_argument("unit", metavar="UNIT")
     c.add_argument("--plan", default=None, metavar="PLAN_ID")
     c.add_argument("--comment", required=True)
@@ -677,12 +783,12 @@ def run_pr(args):
     def go():
         with store.ProjectLock(root, "pr"):
             pid, unit = _unit(root, args)
-            rec = open_pr(root, pid, unit)
+            rec = open_branch_pr(root, pid, unit) if unit["kind"] == "pr" else open_pr(root, pid, unit)
         print(json.dumps(rec, indent=2, sort_keys=True))
         return 0
     return _guard(go)
 
 
 def register_commands(register):
-    register("issues", "file issues from an approved plan, or close a job unit's issue", configure_issues, run_issues)
-    register("pr", "push a judged unit branch and open or update its pull request", configure_pr, run_pr)
+    register("issues", "file issues from an approved plan, or close a job or pr unit's issue", configure_issues, run_issues)
+    register("pr", "open or update a pull request: push a judged code unit's branch, or open a pr unit's existing branch", configure_pr, run_pr)

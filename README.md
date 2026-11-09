@@ -29,7 +29,7 @@ A run goes like this:
 5. **Loop.** `overseer.py next` lists what can happen now, derived from disk. The orchestrator dispatches ready units, waits, judges, reviews, adjudicates, checks non-vacuity, opens pull requests and merges, until every unit is closed.
 6. **Report.** A public report lists every unit, its evidence and anything left open.
 
-A plan has two kinds of unit. A **code** unit is a change to the repository, written by an agent in its own worktree and closed by a merged pull request. A **job** unit is a command (an analysis, a Nextflow or Snakemake run) that writes declared outputs; it closes when its judgment is DONE. Units can depend on each other through `needs`, so a job can run on code that earlier units merged.
+A plan has three kinds of unit. A **code** unit is a change to the repository, written by an agent in its own worktree and closed by a merged pull request. A **job** unit is a command (an analysis, a Nextflow or Snakemake run) that writes declared outputs; it closes when its judgment is DONE. Units can depend on each other through `needs`, so a job can run on code that earlier units merged. A **pr** unit opens a pull request for a branch that already exists on origin (draft or not, against a base you name, with a body you write); it has no worker, closes when the pull request is open and is never merged by the supervisor. Plans accept only the documented keys: an unknown key is a validation error.
 
 ## Requirements
 

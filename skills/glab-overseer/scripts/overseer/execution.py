@@ -410,6 +410,14 @@ def _unit_of(plan, unit_id):
     raise ExecutionError("unit %r is not in plan %s" % (unit_id, plan["plan_id"]))
 
 
+def refuse_pr_unit(unit, what):
+    """A pr unit only opens a pull request: no worker, attempt, judgment, review or merge ever applies to it."""
+    if unit["kind"] == "pr":
+        raise ExecutionError("unit %s is a pr unit; it %s (use `pr %s`, then `issues close`)"
+                             % (unit["id"], what, unit["id"]))
+    return unit
+
+
 def _counter(st):
     n = st["counters"].get("attempts")
     if not _int(n, 0):
@@ -421,7 +429,7 @@ def _admit(root, plan_id, unit_id, after_quota):
     """Admission checks shared by allocation and reuse; returns (plan, unit state, last attempt)."""
     approval.require_approval(root, plan_id)
     plan = approval.effective_plan(root, plan_id)
-    _unit_of(plan, unit_id)
+    refuse_pr_unit(_unit_of(plan, unit_id), "has no worker or attempt")
     st = approval.load_unit_state(root, plan_id, unit_id)
     if st["closure"].get("state") in approval.CLOSED_STATES:
         raise ExecutionError("unit %s is %s" % (unit_id, st["closure"]["state"]))
@@ -917,7 +925,7 @@ def run_dispatch(args):
             controller.report_owner_stops(root, "dispatch", pid, problems)
             return 1
         approval.require_approval(root, pid)
-        unit = _unit_of(approval.effective_plan(root, pid), args.unit)
+        unit = refuse_pr_unit(_unit_of(approval.effective_plan(root, pid), args.unit), "is never dispatched")
         if unit["kind"] == "code":
             from . import workspace
             rec = workspace.dispatch_code(root, pid, unit, args.after_quota)
@@ -978,6 +986,7 @@ def collect_status(root, write=False):
             st = approval.load_unit_state(root, pid, u["id"])
             units[u["id"]] = dict(
                 dict((f, st[f]) for f in approval.FACETS), kind=u["kind"], attempts=st["counters"]["attempts"],
+                **({"pr": st["closure"].get("pr")} if u["kind"] == "pr" else {}),
                 active=[{"attempt": i["attempt"], "invocation": i["seq"], "kind": i["kind"],
                          "state": i["status"]["state"], "pid": i["status"].get("pid"),
                          "job_id": i["status"].get("job_id")}
@@ -1003,7 +1012,8 @@ def run_status(args):
         for uid, u in p["units"].items():
             print("  %s (%s) auth=%s exec=%s closure=%s tracker=%s attempts=%d" % (
                 uid, u["kind"], u["authorization"].get("state"), u["execution"].get("state"),
-                u["closure"].get("state"), u["tracker"].get("state", "-"), u["attempts"]))
+                u["closure"].get("state"), u["tracker"].get("state", "-"), u["attempts"])
+                  + (" pr=#%s" % u["pr"] if u["kind"] == "pr" and u.get("pr") is not None else ""))
             for a in u["active"]:
                 print("    a%d/%s %s %s" % (a["attempt"], a["invocation"], a["state"],
                                    "job=%s" % a["job_id"] if a.get("job_id") else "pid=%s" % a.get("pid")))

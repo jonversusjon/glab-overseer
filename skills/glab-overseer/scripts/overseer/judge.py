@@ -27,6 +27,7 @@ class JudgeError(X.ExecutionError):
 
 
 def _unit_attempt(root, plan_id, unit):
+    X.refuse_pr_unit(unit, "has no attempt to judge")
     st = approval.load_unit_state(root, plan_id, unit["id"])
     n = st["counters"]["attempts"]
     if not X._int(n):
@@ -458,7 +459,7 @@ def resolve_unit(root, plan_id, unit, as_, reason, evidence):
 def _unit_for(root, args):
     pid = args.plan or approval.find_plan_for_unit(root, args.unit)
     approval.require_approval(root, pid)
-    return pid, X._unit_of(approval.effective_plan(root, pid), args.unit)
+    return pid, X.refuse_pr_unit(X._unit_of(approval.effective_plan(root, pid), args.unit), "has no judgment")
 
 
 def configure_judge(p):

@@ -50,7 +50,7 @@ class ValidateTests(unittest.TestCase):
     def test_bad_kind(self):
         p = plan_copy()
         self.unit(p, "alpha")["kind"] = "pipeline"
-        self.assertError(p, "unit alpha: kind 'pipeline' must be 'code' or 'job'")
+        self.assertError(p, "unit alpha: kind 'pipeline' must be 'code', 'job' or 'pr'")
 
     def test_code_missing_fields(self):
         for f in ("title", "prompt", "claims", "test_command", "outputs", "scope"):
@@ -175,7 +175,9 @@ class ValidateTests(unittest.TestCase):
         for ok in ("modelling", "remodel", "familyname", "providers_list", "effort_estimate"):
             p = plan_copy()
             self.unit(p, "alpha")[ok] = "x"
-            self.assertEqual(errs(p), [], ok)
+            # not a model key; it is still an unknown key, which `plan validate` rejects on its own
+            self.assertFalse([e for e in errs(p) if "names a model" in e], ok)
+            self.assertTrue([e for e in errs(p) if "unknown key(s) %r" % ok in e], ok)
         for bad in ("model", "models", "provider", "family", "thinking", "effort", "agent_model",
                     "x_provider", "tier_family", "Model"):
             p = plan_copy()

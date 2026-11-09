@@ -176,10 +176,10 @@ def task_text(unit):
     return "\n".join(lines)
 
 
-def check_branch_name(name):
+def check_branch_name(name, what="target branch"):
     if not (isinstance(name, str) and BRANCH_RE.match(name) and ".." not in name and "//" not in name
             and not name.endswith(("/", ".", ".lock")) and "@{" not in name):
-        raise WorkspaceError("target branch %r is not a safe branch name" % (name,))
+        raise WorkspaceError("%s %r is not a safe branch name" % (what, name))
     return name
 
 
